@@ -197,6 +197,34 @@ _UNS_MARKUP = {
 }
 
 
+def _neutralize_broken_libmagic() -> None:
+    """로드 불가능한 libmagic 때문에 프로세스가 죽는 것을 막는다.
+
+    Windows에서 python-magic 은 후보를 순서대로 훑다가 마지막에 %PATH% 의
+    Git for Windows `msys-magic-1.dll` 을 집는다. 이건 MSYS2 빌드라 네이티브
+    파이썬에 ctypes 로 로드되는 순간 access violation 으로 인터프리터가 죽는다
+    (try/except 로 잡히지 않는 세그폴트).
+
+    unstructured 는 `magic` 임포트가 실패하면 `filetype` 패키지 기반 탐지로
+    폴백하도록 이미 만들어져 있다. 그래서 sys.modules 에 None 을 심어
+    `import magic` 을 ImportError 로 만들어 그 폴백 경로로 보낸다.
+    정상 libmagic 이 설치된 환경이라면 손대지 않는다.
+    """
+    import sys
+
+    if sys.platform not in ("win32", "cygwin") or "magic" in sys.modules:
+        return
+
+    from ctypes.util import find_library
+
+    # python-magic 이 msys-magic-1 보다 먼저 시도하는 후보들
+    for name in ("magic", "libmagic", "magic1", "cygmagic-1", "libmagic-1"):
+        if find_library(name) or Path(f"./{name}.dll").exists():
+            return  # 쓸 수 있는 libmagic 이 있으니 그대로 둔다
+
+    sys.modules["magic"] = None  # type: ignore[assignment]
+
+
 def extract_unstructured(path: str | Path) -> ExtractResult:
     """unstructured: 문서를 의미 단위 요소(Title/NarrativeText/Table…)로 분해."""
     res = ExtractResult(
@@ -204,6 +232,7 @@ def extract_unstructured(path: str | Path) -> ExtractResult:
     )
     t0 = time.perf_counter()
     try:
+        _neutralize_broken_libmagic()
         from unstructured.partition.auto import partition
 
         kwargs = {}

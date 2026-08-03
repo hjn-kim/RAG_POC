@@ -1,4 +1,7 @@
-"""문서 추출 비교 데모 — PDF/DOCX를 3가지 방식으로 추출해 결과를 비교한다.
+"""문서 추출 비교 데모 — 앱 폴더에 있는 PDF/DOCX를 여러 방식으로 추출해 비교한다.
+
+대상 파일은 고정돼 있지 않다. app.py 옆에 놓인 .pdf/.docx 를 그대로 집어오므로,
+파일을 갈아끼우면 코드 수정 없이 그 파일들을 비교한다.
 
 실행: streamlit run app.py
 """
@@ -13,9 +16,26 @@ import streamlit as st
 from extractors import EXTRACTORS
 
 BASE_DIR = Path(__file__).parent
-DEFAULT_FILES = ["ATLAS___EACL027.pdf", "논문번역.docx"]
+SUPPORTED_EXTS = (".pdf", ".docx")
 
 st.set_page_config(page_title="문서 추출 비교", page_icon="📄", layout="wide")
+
+# st.metric 은 값 글꼴이 2.25rem 으로 고정이라 열이 좁으면 "12…" 처럼 잘린다.
+# 숫자가 절대 잘리지 않도록 직접 그린다: 글꼴을 줄이고, 좁으면 잘리는 대신
+# 다음 줄로 흐르게 하며(flex-wrap), 각 값 내부는 줄바꿈을 막는다(nowrap).
+st.markdown(
+    """
+    <style>
+      .stat-row { display:flex; flex-wrap:wrap; gap:.15rem .9rem;
+                  margin:.1rem 0 .5rem; }
+      .stat-row .stat { display:flex; flex-direction:column; line-height:1.2; }
+      .stat-row .k { font-size:.68rem; opacity:.6; white-space:nowrap; }
+      .stat-row .v { font-size:.95rem; font-weight:600; white-space:nowrap;
+                     font-variant-numeric:tabular-nums; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ------------------------------------------------------------------ helpers
@@ -31,15 +51,26 @@ def run_extract(path: str, method: str, mtime: float):
 
 
 def file_options() -> dict[str, Path]:
-    opts = {}
-    for name in DEFAULT_FILES:
-        p = BASE_DIR / name
-        if p.exists():
-            opts[name] = p
-    for p in sorted(BASE_DIR.glob("*")):
-        if p.suffix.lower() in (".pdf", ".docx") and p.name not in opts:
-            opts[p.name] = p
-    return opts
+    """app.py 옆에 있는 PDF/DOCX 를 이름순으로 모은다."""
+    return {
+        p.name: p
+        for p in sorted(BASE_DIR.glob("*"))
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+    }
+
+
+def default_selection(opts: dict[str, Path]) -> list[str]:
+    """확장자별 첫 파일 하나씩(PDF 1 + DOCX 1)을 기본 선택으로 삼는다.
+
+    파일을 여러 개 넣어둔 경우 전부 자동 실행하면 Docling 때문에 비싸므로,
+    포맷별 대표 하나씩만 켜두고 나머지는 사용자가 고르게 한다.
+    """
+    picked = []
+    for ext in SUPPORTED_EXTS:
+        first = next((n for n, p in opts.items() if p.suffix.lower() == ext), None)
+        if first:
+            picked.append(first)
+    return picked or list(opts)[:2]
 
 
 def human_size(n: int) -> str:
@@ -56,11 +87,22 @@ def render_result(res, key: str, view: str):
         st.code(res.error, language="text")
         return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("소요 시간", f"{res.elapsed:.2f} s")
-    c2.metric("문자 수", f"{res.n_chars:,}")
-    c3.metric("단어 수", f"{res.n_words:,}")
-    c4.metric("줄 수", f"{res.n_lines:,}")
+    stats = [
+        ("소요 시간", f"{res.elapsed:.2f}s"),
+        ("문자 수", f"{res.n_chars:,}"),
+        ("단어 수", f"{res.n_words:,}"),
+        ("줄 수", f"{res.n_lines:,}"),
+    ]
+    st.markdown(
+        '<div class="stat-row">'
+        + "".join(
+            f'<div class="stat"><span class="k">{k}</span>'
+            f'<span class="v">{v}</span></div>'
+            for k, v in stats
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
     st.caption(f"백엔드: `{res.backend}`" + ("  ·  " + "  ·  ".join(f"{k}: {v}" for k, v in res.meta.items()) if res.meta else ""))
 
@@ -96,19 +138,29 @@ if uploaded is not None:
     target = tmp / uploaded.name
     target.write_bytes(uploaded.getbuffer())
     opts = {uploaded.name: target, **opts}
+    default_names = [uploaded.name]
+else:
+    default_names = default_selection(opts)
 
 if not opts:
-    st.error(f"`{BASE_DIR}` 안에 PDF/DOCX 파일이 없습니다.")
+    st.error(
+        f"`{BASE_DIR}` 안에 PDF/DOCX 파일이 없습니다. "
+        "app.py 옆에 파일을 두거나 위에서 직접 업로드하세요."
+    )
     st.stop()
 
-selected_names = st.sidebar.multiselect(
-    "대상 문서", list(opts), default=list(opts)[: len(DEFAULT_FILES)]
-)
+selected_names = st.sidebar.multiselect("대상 문서", list(opts), default=default_names)
 selected_methods = st.sidebar.multiselect(
     "추출 방식", list(EXTRACTORS), default=list(EXTRACTORS)
 )
 view = st.sidebar.radio("보기 모드", ["렌더링", "원본 텍스트"], horizontal=True)
-layout = st.sidebar.radio("배치", ["나란히 비교", "탭"], horizontal=True)
+layout = st.sidebar.radio(
+    "배치",
+    ["나란히 비교", "탭"],
+    # 4개 이상을 나란히 놓으면 열이 너무 좁아지므로 그때는 탭을 기본으로 둔다.
+    index=0 if len(selected_methods) <= 3 else 1,
+    horizontal=True,
+)
 
 st.sidebar.divider()
 if st.sidebar.button("🔄 캐시 비우고 다시 추출", width="stretch"):
