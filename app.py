@@ -84,6 +84,15 @@ def human_size(n: int) -> str:
 def render_result(res, key: str, view: str):
     if not res.ok:
         st.error(f"**{res.backend}** 추출 실패")
+        # 리눅스 배포(Streamlit Cloud 등)에서 가장 흔한 실패라 조치법을 같이 띄운다.
+        if "libGL.so.1" in (res.error or ""):
+            st.info(
+                "OpenCV(`opencv-python`)가 쓰는 시스템 라이브러리가 배포 환경에 없습니다.\n\n"
+                "레포 **루트**(app.py 와 같은 위치)에 `packages.txt` 파일을 만들고 "
+                "`libgl1` 한 줄만 넣어 커밋·push 하세요. "
+                "`libglib2.0-0` 은 넣지 마세요 — Streamlit Cloud 는 Debian Bullseye 라 "
+                "의존성 문제로 apt 단계 전체가 실패합니다."
+            )
         st.code(res.error, language="text")
         return
 
