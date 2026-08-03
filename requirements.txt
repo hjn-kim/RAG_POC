@@ -1,0 +1,7 @@
+streamlit>=1.54
+docling>=2.0
+pymupdf>=1.24
+python-docx>=1.1
+pdfplumber>=0.11
+mammoth>=1.8
+unstructured[docx,pdf]>=0.25
