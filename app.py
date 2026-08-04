@@ -14,24 +14,39 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
 
 import streamlit as st
 
 BASE_DIR = Path(__file__).parent
 RESULTS_PATH = BASE_DIR / "results.json"
+TITLE = "추출 모델 성능 비교"
+# 본문 미리보기 박스의 높이(px). 방식마다 같은 값을 써야 아래 "표 추출"이 나란히 선다.
+TEXT_BOX_H = 520
 
-st.set_page_config(page_title="문서 추출 비교", page_icon="📄", layout="wide")
+st.set_page_config(page_title=TITLE, layout="wide")
 
 st.markdown(
     """
     <style>
-      .stat-row { display:flex; flex-wrap:wrap; gap:.15rem .9rem;
+      /* 방식별 열은 나란히 놓고 비교하는 화면이라, 본문 박스가 열마다 다른 높이에서
+         시작하면 눈이 줄을 못 맞춘다. 지표+백엔드 줄을 한 덩어리로 묶어 높이를
+         고정해, 어떤 방식이든 본문 박스가 같은 y 에서 시작하고 같은 y 에서 끝나게 한다. */
+      .res-head { height:9.6rem; display:flex; flex-direction:column; gap:.3rem;
                   margin:.1rem 0 .5rem; }
-      .stat-row .stat { display:flex; flex-direction:column; line-height:1.2; }
-      .stat-row .k { font-size:.8rem; opacity:.65; white-space:nowrap; }
-      .stat-row .v { font-size:1.25rem; font-weight:600; white-space:nowrap;
+      /* 3열 고정 그리드 = 지표 5개가 항상 2줄. 열 너비에 따라 1줄/2줄로 널뛰지 않는다. */
+      .stat-row { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr));
+                  gap:.3rem .6rem; }
+      .stat-row .stat { display:flex; flex-direction:column; line-height:1.2;
+                        min-width:0; }
+      .stat-row .k { font-size:.78rem; opacity:.65; white-space:nowrap; }
+      .stat-row .v { font-size:1.2rem; font-weight:600; white-space:nowrap;
                      font-variant-numeric:tabular-nums; }
+      /* 백엔드 줄만 남은 높이를 먹는다. 길면 잘라내지 않고 이 안에서 스크롤한다. */
+      .res-head .backend { flex:1; min-height:0; overflow-y:auto;
+                           font-size:.75rem; opacity:.72; line-height:1.45; }
+      .res-head .backend code { font-size:.72rem; }
 
       .tbl-wrap { overflow-x:auto; margin:.2rem 0 .4rem; }
       table.cmp { border-collapse:collapse; width:100%; font-size:.85rem; }
@@ -44,12 +59,11 @@ st.markdown(
                          white-space:nowrap; }
       table.cmp.summary td { white-space:nowrap; }
 
-      .text-box { height:520px; overflow:auto; padding:.6rem .8rem;
-                  border:1px solid rgba(128,128,128,.35); border-radius:.5rem;
-                  background:rgba(128,128,128,.07);
-                  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-                  font-size:.78rem; line-height:1.45;
-                  white-space:pre-wrap; word-break:break-word; }
+      /* 높이·테두리는 바깥 컨테이너가 갖는다. 여기선 글꼴과 줄바꿈만 손본다. */
+      .text-plain { margin:0;
+                    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+                    font-size:.78rem; line-height:1.45;
+                    white-space:pre-wrap; word-break:break-word; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -100,6 +114,31 @@ def html_table(header: list[str], rows: list[list], numeric: set[int] = frozense
     )
 
 
+# 백엔드 이름은 실행 조건을 그대로 적어 둔 문자열이라 캡션에서 길다. 화면에선
+# 무엇으로 돌았는지만 알면 되므로 `strategy=` 접두사와 OCR 언어 목록을 접는다.
+_RE_OCR_LANGS = re.compile(r"OCR\s+[A-Za-z]{2,4}(?:\+[A-Za-z]{2,4})*")
+
+
+def short_backend(backend: str) -> str:
+    return _RE_OCR_LANGS.sub("OCR", backend.replace("strategy=", ""))
+
+
+# 본문 성격의 요소 카테고리. 개수를 세어 봐야 방식 간 비교에 쓸 데가 없고
+# 캡션만 길어져서 접는다 (구조를 말해 주는 Table/Title/Image 는 남긴다).
+_META_SKIP = {"UncategorizedText", "NarrativeText"}
+
+
+def short_meta(meta: dict) -> dict:
+    """캡션에 실을 meta 만 남긴다."""
+    return {
+        k: v
+        for k, v in meta.items()
+        if k not in _META_SKIP
+        # "그림 개수" 와 "Image" 는 같은 값을 두 번 말한다. 둘 다 있으면 하나만.
+        and not (k == "그림 개수" and "Image" in meta)
+    }
+
+
 def render_tables(res: dict, max_tables: int) -> None:
     tables = res.get("tables") or []
     st.markdown(f"**표 추출 (처음 {max_tables}개)**")
@@ -140,33 +179,37 @@ def render_result(res: dict, view: str, show_tables: bool, max_tables: int) -> N
         ("단어 수", f"{res['n_words']:,}"),
         ("줄 수", f"{res['n_lines']:,}"),
     ]
+    meta = short_meta(res.get("meta") or {})
+    meta_txt = "  ·  ".join(f"{esc(k)}: {esc(v)}" for k, v in meta.items())
+    # 지표와 백엔드 줄을 한 블록으로 낸다. 나눠서 내면 방식마다 캡션 줄 수가 달라져
+    # 아래 본문 박스의 시작 높이가 열마다 어긋난다.
     st.markdown(
-        '<div class="stat-row">'
+        '<div class="res-head"><div class="stat-row">'
         + "".join(
             f'<div class="stat"><span class="k">{esc(k)}</span>'
             f'<span class="v">{esc(v)}</span></div>'
             for k, v in stats
         )
-        + "</div>",
+        + '</div><div class="backend">백엔드: '
+        + f"<code>{esc(short_backend(res['backend']))}</code>"
+        + (f"  ·  {meta_txt}" if meta_txt else "")
+        + "</div></div>",
         unsafe_allow_html=True,
     )
 
-    meta = res.get("meta") or {}
-    st.caption(
-        f"백엔드: `{res['backend']}`"
-        + ("  ·  " + "  ·  ".join(f"{k}: {v}" for k, v in meta.items()) if meta else "")
-    )
-
     text = res.get("text") or ""
-    if not text.strip():
-        st.warning("추출된 텍스트가 없습니다.")
-        return
-
-    if view == "렌더링" and res.get("is_markdown"):
-        with st.container(height=520, border=True):
+    # 텍스트가 없어도 박스는 그대로 둔다. 여기서 빼 버리면 그 열만 위로 당겨져
+    # 아래 "표 추출"이 다른 열과 어긋난다.
+    with st.container(height=TEXT_BOX_H, border=True):
+        if not text.strip():
+            st.warning("추출된 텍스트가 없습니다.")
+        elif view == "렌더링" and res.get("is_markdown"):
             st.markdown(text)
-    else:
-        st.markdown(f'<div class="text-box">{esc(text)}</div>', unsafe_allow_html=True)
+        else:
+            # 렌더링 모드든 원본 모드든 바깥 컨테이너가 같아야 높이가 정확히 맞는다.
+            st.markdown(
+                f'<div class="text-plain">{esc(text)}</div>', unsafe_allow_html=True
+            )
 
     if show_tables:
         render_tables(res, max_tables)
@@ -175,7 +218,7 @@ def render_result(res: dict, view: str, show_tables: bool, max_tables: int) -> N
 # ------------------------------------------------------------------ 데이터 적재
 
 if not RESULTS_PATH.exists():
-    st.title("📄 문서 내용 추출 비교")
+    st.title(TITLE)
     st.error("`results.json` 이 없습니다.")
     st.markdown(
         "이 화면은 미리 계산해 둔 결과만 보여 줍니다. 로컬에서 아래를 실행해 "
@@ -210,7 +253,7 @@ st.sidebar.caption(
 
 # --------------------------------------------------------------------- main
 
-st.title("📄 문서 내용 추출 비교")
+st.title(TITLE)
 st.markdown(
     f"동일한 문서를 **{len(methods_info)}가지 추출 방식**으로 처리한 결과를 비교합니다. "
     f"소요 시간을 포함한 모든 수치는 로컬 실측값이며, 여기서는 그 값을 그대로 보여 줍니다."
@@ -302,6 +345,9 @@ Docling 은 {base_name} 대비 {docling_clause}. 둘을 나눠 쓰는 게 비용
 **2. 품질 중심 방안 — Docling**
 네 방식 중 그림 영역을 인식하는 유일한 방식이고, 표를 셀 구조 그대로 복원하며 읽기 순서까지 맞춰 줍니다.
 시간을 감당할 수 있다면 Docling 단독이 정보 손실이 가장 적습니다.
+
+**3. 선택적 추출 모델**
+사용자가 지정한 문서의 중요도에 따라 다른 추출 모델 사용 선택지 
 """
         )
 
