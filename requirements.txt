@@ -1,10 +1,6 @@
+# 배포(app.py) 전용. app.py 는 results.json 을 읽어 그리기만 하므로 추출 라이브러리가
+# 필요 없다. Docling·unstructured 를 여기 넣으면 Streamlit Community Cloud 에서
+# 설치·모델 로딩만으로 리소스 한도를 넘겨 앱이 죽는다.
+#
+# 로컬에서 실제 추출을 돌릴 때는 requirements-local.txt 를 쓴다.
 streamlit>=1.54
-docling>=2.0
-pymupdf>=1.24
-python-docx>=1.1
-pdfplumber>=0.11
-mammoth>=1.8
-unstructured[docx,pdf]>=0.25
-# unstructured[pdf] extra 가 끌어오지 않지만 partition/pdf.py 가 모듈 최상단에서
-# 임포트한다. strategy="fast" 에도 필요하므로 명시한다.
-unstructured-inference>=1.6
