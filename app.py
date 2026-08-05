@@ -361,19 +361,24 @@ def render_analysis() -> None:
     baseline = data.get("baseline_method")
     base_method = baseline if baseline in totals else min(totals, key=totals.get)
     base = totals[base_method] or 1e-9
-    # 실제 백엔드 이름 하나만 쓴다. PDF/DOCX 를 섞어 골랐을 때 "PyMuPDF /
-    # python-docx" 로 늘어놓으면 열 제목과 문장이 지저분해지므로 PDF 쪽을 대표로 쓴다.
+    # 실제 백엔드 이름 하나만 쓴다. 방식 키를 그대로 적으면 "PyMuPDF / python-docx"
+    # 와 "pdfplumber / mammoth" 가 연달아 나와 슬래시만 두 줄 겹쳐 지저분하다.
+    # PDF/DOCX 를 섞어 골랐을 때는 PDF 쪽 백엔드를 대표로 쓴다.
     pdf_doc = next(
         (n for n in selected_names if documents[n]["ext"] == ".pdf"), selected_names[0]
     )
-    base_res = documents[pdf_doc]["results"].get(base_method)
-    base_name = (base_res or {}).get("label") or base_method
+
+    def rep_name(m: str) -> str:
+        r = documents[pdf_doc]["results"].get(m)
+        return (r or {}).get("label") or m.split("/")[0].strip()
+
+    base_name = rep_name(base_method)
 
     rows = []
     for m, secs in sorted(totals.items(), key=lambda kv: kv[1]):
         rows.append(
             [
-                m,
+                rep_name(m),
                 f"{secs:.2f}",
                 "기준 (1×)" if m == base_method else f"{secs / base:.1f}×",
                 samples[m].get("image_mark", "-"),
