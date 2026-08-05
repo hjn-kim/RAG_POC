@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 from pathlib import Path
 
@@ -139,33 +140,101 @@ def short_meta(meta: dict) -> dict:
     }
 
 
-def render_tables(res: dict, max_tables: int) -> None:
+# ------------------------------------------------ 표 박스 높이 맞추기
+#
+# unstructured 는 같은 표를 다른 격자로 쪼개 넣어서 (한 칸에 "책 임 자" 처럼
+# 자간이 벌어진 조각이 들어간다) 행·열 수도 셀 길이도 나머지 셋과 따로 논다.
+# 열을 나란히 놓고 비교하는 화면인데 그 한 열만 아래로 더 흐르면 나머지 열은
+# 밑이 텅 빈 채로 남는다. 그래서 표 영역을 고정 높이 박스에 넣고, 그 높이는
+# unstructured 를 뺀 왼쪽 방식들 기준으로 잡는다. 넘치는 만큼은 박스 안에서
+# 스크롤된다 (화면에선 잘리되 내용은 버리지 않는다).
+_OUTLIER_METHODS = {"unstructured"}
+
+# 실제 렌더 높이는 브라우저만 아는 값이라, 셀 글자 수로 줄바꿈을 어림해 픽셀로
+# 환산한다. CSS 의 표 서식(.85rem, padding .3rem/.55rem)에서 뽑은 값이다.
+_LINE_PX = 20.0  # .85rem × 1.45
+_ROW_PAD_PX = 11.0  # 셀 상하 패딩 + 테두리
+_CELL_PAD_PX = 20.0  # 셀 좌우 패딩 + 테두리
+_CAPTION_PX = 26.0  # "표 n · a행 × b열" 한 줄
+_TBL_MARGIN_PX = 12.0  # .tbl-wrap 위아래 여백
+_NOTE_PX = 74.0  # 표가 없을 때 뜨는 안내 문구
+_BOX_PAD_PX = 34.0  # st.container 안쪽 여백
+_CONTENT_W_PX = 1360.0  # 와이드 레이아웃 본문 폭 어림
+_COL_GAP_PX = 16.0
+# 셀 하나에 문단 전체가 들어간 표(Docling 의 doc1 같은)는 어림값이 2,000px 을
+# 넘어간다. 그만큼 박스를 키우면 화면 한 장을 표가 다 먹으므로 한 화면 높이에서
+# 끊고 그 아래는 스크롤로 넘긴다. 표를 통째로 펼쳐 보고 싶으면 이 값을 올린다.
+_BOX_MIN_PX, _BOX_MAX_PX = 150, 900
+
+
+def _text_px(s) -> float:
+    """문자열의 렌더 폭 어림. 한글·한자·가나는 글자 크기만큼, 나머지는 절반쯤."""
+    return sum(13.6 if ord(c) > 0x2E80 else 7.4 for c in str(s))
+
+
+def _table_px(rows: list[list], col_px: float) -> float:
+    n = max((len(r) for r in rows), default=1)
+    cell_px = max(col_px / n - _CELL_PAD_PX, 24.0)
+    # 헤더는 white-space:nowrap 이라 줄바꿈 없이 한 줄.
+    h = _CAPTION_PX + _TBL_MARGIN_PX + _LINE_PX + _ROW_PAD_PX
+    for r in rows[1:]:
+        lines = max((math.ceil(_text_px(c) / cell_px) for c in r), default=1)
+        h += max(lines, 1) * _LINE_PX + _ROW_PAD_PX
+    return h
+
+
+def _tables_px(res: dict, col_px: float) -> float:
+    tables = [t for t in (res.get("tables") or []) if t]
+    if not tables:
+        return _NOTE_PX
+    return sum(_table_px(t, col_px) for t in tables)
+
+
+def tables_box_height(doc: dict, methods: list[str]) -> int:
+    """표 박스의 공통 높이(px). unstructured 를 뺀 방식들에 길이를 맞춘다."""
+    col_px = (_CONTENT_W_PX - _COL_GAP_PX * (len(methods) - 1)) / max(len(methods), 1)
+    ref = [m for m in methods if m not in _OUTLIER_METHODS] or methods
+    heights = [
+        _tables_px(r, col_px)
+        for m in ref
+        if (r := doc["results"].get(m)) and r.get("ok")
+    ]
+    if not heights:
+        return _BOX_MIN_PX
+    return int(min(max(max(heights) + _BOX_PAD_PX, _BOX_MIN_PX), _BOX_MAX_PX))
+
+
+def render_tables(res: dict, max_tables: int, box_h: int) -> None:
     tables = res.get("tables") or []
     st.markdown(f"**표 추출 (처음 {max_tables}개)**")
-    if not tables:
-        # 왜 안 잡혔는지를 추출기가 남겨 뒀으면 그대로 띄운다. 방식마다 이유가
-        # 다르고(전략·괘선·모델), 그 이유가 곧 이 비교 데모의 핵심이다.
-        note = res.get("tables_note")
-        if note:
-            st.info(note)
-        else:
-            st.caption("이 방식으로는 표가 추출되지 않았습니다.")
-        return
+    # 표가 없는 열도 박스는 그대로 둔다. 빼 버리면 그 열만 짧아져 줄이 어긋난다.
+    with st.container(height=box_h, border=True):
+        if not tables:
+            # 왜 안 잡혔는지를 추출기가 남겨 뒀으면 그대로 띄운다. 방식마다 이유가
+            # 다르고(전략·괘선·모델), 그 이유가 곧 이 비교 데모의 핵심이다.
+            note = res.get("tables_note")
+            if note:
+                st.info(note)
+            else:
+                st.caption("이 방식으로는 표가 추출되지 않았습니다.")
+            return
 
-    for i, rows in enumerate(tables, 1):
-        if not rows:
-            continue
-        st.caption(f"표 {i} · {len(rows)}행 × {len(rows[0])}열")
-        header, body = rows[0], rows[1:]
-        if body:
-            width = len(header)
-            body = [(r + [""] * width)[:width] for r in body]
-        else:
-            header, body = [f"열 {j + 1}" for j in range(len(rows[0]))], rows
-        st.markdown(html_table(header, body), unsafe_allow_html=True)
+        for i, rows in enumerate(tables, 1):
+            if not rows:
+                continue
+            st.caption(f"표 {i} · {len(rows)}행 × {len(rows[0])}열")
+            header, body = rows[0], rows[1:]
+            if body:
+                width = len(header)
+                body = [(r + [""] * width)[:width] for r in body]
+            else:
+                header, body = [f"열 {j + 1}" for j in range(len(rows[0]))], rows
+            st.markdown(html_table(header, body), unsafe_allow_html=True)
 
 
-def render_result(res: dict, view: str, show_tables: bool, max_tables: int) -> None:
+def render_result(
+    res: dict, view: str, show_tables: bool, max_tables: int, box_h: int
+) -> None:
     if not res.get("ok"):
         st.error(f"**{res.get('backend', '-')}** 추출 실패")
         st.code(res.get("error") or "-", language="text")
@@ -212,7 +281,7 @@ def render_result(res: dict, view: str, show_tables: bool, max_tables: int) -> N
             )
 
     if show_tables:
-        render_tables(res, max_tables)
+        render_tables(res, max_tables, box_h)
 
 
 # ------------------------------------------------------------------ 데이터 적재
@@ -342,7 +411,7 @@ def render_analysis() -> None:
 **1. 품질 중심 방안 — Docling**
 네 방식 중 그림 영역을 인식하는 유일한 방식이고, 표를 셀 구조 그대로 복원하며 읽기 순서까지 맞춰 줍니다.Docling 단독이 정보 손실이 가장 적은 방식
 
-**2. 시간 중심 방안 — PyMuPDF와 Docling의 선택적 하이브리드 처리 **
+**2. 시간 중심 방안 — PyMuPDF와 Docling의 선택적 하이브리드 처리**
 : 전체 문서의 일반 본문은 PyMuPDF로 빠르게 추출하고, 표·그림·다단 구조·스캔 영역 등 구조 분석이 필요한 페이지에만 Docling을 적용합니다. 이후 해당 페이지의 PyMuPDF 결과를 Docling 결과로 교체하거나 구조 정보만 보강합니다. 이를 통해 Docling의 전체 문서 처리 비용을 줄이면서 복잡한 페이지의 추출 품질을 확보할 수 있습니다.
 
 **3. 선택적 추출 모델**
@@ -415,6 +484,9 @@ for name in selected_names:
         "**원문 문자**는 마크업을 포함한 추출 결과 그대로의 길이입니다."
     )
 
+    # 표 박스 높이는 문서마다 다르지만 그 문서 안에서는 열마다 같아야 한다.
+    box_h = tables_box_height(doc, selected_methods)
+
     # 방식 수만큼 열을 만들어 항상 나란히 놓는다. 클릭 없이 전부 한눈에 보인다.
     for col, method in zip(st.columns(len(selected_methods)), selected_methods):
         with col:
@@ -425,5 +497,9 @@ for name in selected_names:
                 continue
             # 표 미리보기는 PDF 결과에만 붙인다.
             render_result(
-                res, view, show_tables=doc["ext"] == ".pdf", max_tables=max_tables
+                res,
+                view,
+                show_tables=doc["ext"] == ".pdf",
+                max_tables=max_tables,
+                box_h=box_h,
             )
